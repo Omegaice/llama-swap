@@ -71,6 +71,8 @@ type Server struct {
 	local router.LocalRouter
 	peer  router.Router
 
+	peerHealth *peerHealthTracker
+
 	peerListings peerListingCache
 
 	mux     *http.ServeMux
@@ -229,6 +231,8 @@ func New(cfg config.Config, logs *logmon.Group, perfMon *perf.Monitor, st store.
 	if err != nil {
 		return nil, fmt.Errorf("creating peer router: %w", err)
 	}
+	peerHealth := newPeerHealthTracker(cfg, logs.ProxyLogs)
+	peer.SetHealth(peerHealth)
 
 	if st == nil {
 		return nil, fmt.Errorf("store is required")
@@ -248,6 +252,7 @@ func New(cfg config.Config, logs *logmon.Group, perfMon *perf.Monitor, st store.
 		activeProfile: cfg.Hooks.OnStartup.Profile,
 		local:         local,
 		peer:          peer,
+		peerHealth:    peerHealth,
 		shutdownCtx:   shutdownCtx,
 		shutdownFn:    shutdownFn,
 	}
@@ -268,6 +273,7 @@ func New(cfg config.Config, logs *logmon.Group, perfMon *perf.Monitor, st store.
 
 	s.routes()
 	s.startPreload()
+	s.peerHealth.startPolling(shutdownCtx, cfg)
 	return s, nil
 }
 
@@ -410,6 +416,7 @@ func (s *Server) routes() {
 	mux.Handle("GET /api/metrics/stats", apiChain.ThenFunc(s.handleAPIActivityStats))
 	mux.Handle("GET /api/performance", apiChain.ThenFunc(s.handleAPIPerformance))
 	mux.Handle("GET /api/version", apiChain.ThenFunc(s.handleAPIVersion))
+	mux.Handle("GET /api/peers", apiChain.ThenFunc(s.handleAPIPeers))
 	mux.Handle("GET /api/hardware", apiChain.ThenFunc(s.handleAPIHardware))
 	mux.Handle("GET /api/tailcat", apiChain.ThenFunc(s.handleAPITailcat))
 	mux.Handle("GET /api/captures/{id}", apiChain.ThenFunc(s.handleAPICapture))

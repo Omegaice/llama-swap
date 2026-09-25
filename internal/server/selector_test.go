@@ -137,11 +137,11 @@ func TestServer_SelectorStrategySpillover(t *testing.T) {
 	}
 	tracker := newSelectorSpilloverTracker(cfg)
 
-	first, err := strategySpillover("pool", tracker, nil)
+	first, err := strategySpillover("pool", tracker, nil, nil)
 	require.NoError(t, err)
-	second, err := strategySpillover("pool", tracker, nil)
+	second, err := strategySpillover("pool", tracker, nil, nil)
 	require.NoError(t, err)
-	third, err := strategySpillover("pool", tracker, nil)
+	third, err := strategySpillover("pool", tracker, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "a", first)
 	assert.Equal(t, "a", second)
@@ -152,7 +152,7 @@ func TestServer_SelectorStrategySpillover(t *testing.T) {
 		"a": process.StateReady,
 		"b": process.StateReady,
 		"c": process.StateReady,
-	})
+	}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "c", target)
 
@@ -161,7 +161,7 @@ func TestServer_SelectorStrategySpillover(t *testing.T) {
 		"a": process.StateStopping,
 		"b": process.StateStopping,
 		"c": process.StateShutdown,
-	})
+	}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no available spillover targets")
 }
@@ -181,17 +181,17 @@ func TestServer_SelectorStrategySpillover_RemoteModels(t *testing.T) {
 	}
 	tracker := newSelectorSpilloverTracker(cfg)
 
-	first, err := strategySpillover("pool", tracker, nil)
+	first, err := strategySpillover("pool", tracker, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "remote/a", first)
 
-	second, err := strategySpillover("pool", tracker, nil)
+	second, err := strategySpillover("pool", tracker, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "remote/b", second)
 
 	tracker.release("pool", first)
 	tracker.release("pool", second)
-	target, err := strategySpillover("pool", tracker, nil)
+	target, err := strategySpillover("pool", tracker, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "remote/a", target)
 }
@@ -430,4 +430,44 @@ func TestServer_Selector_ModelListingPinUsesFirstTarget(t *testing.T) {
 		}
 	}
 	t.Fatal("public selector missing from model listing")
+}
+
+func TestServer_SelectorStrategySpillover_SkipsDownPeers(t *testing.T) {
+	cfg := config.Config{
+		Peers: config.PeerDictionaryConfig{
+			"laptop":  {Models: []string{"a"}},
+			"desktop": {Models: []string{"a"}},
+		},
+		Selectors: map[string]config.SelectorConfig{
+			"pool": {
+				Strategy: config.SelectorStrategySpillover,
+				Targets:  []string{"laptop/a", "desktop/a"},
+				Settings: config.SelectorSettings{Spillover: 1},
+			},
+		},
+	}
+	tracker := newSelectorSpilloverTracker(cfg)
+	down := map[string]bool{"laptop": true}
+	allowed := func(peerID string) bool { return !down[peerID] }
+
+	// The preferred node is down, so the pool starts on the second.
+	target, err := strategySpillover("pool", tracker, nil, allowed)
+	require.NoError(t, err)
+	assert.Equal(t, "desktop/a", target)
+	tracker.release("pool", target)
+
+	// Every peer down: fall back to the full list so the peer router
+	// answers with its own refusal rather than a selector 503.
+	down["desktop"] = true
+	target, err = strategySpillover("pool", tracker, nil, allowed)
+	require.NoError(t, err)
+	assert.Equal(t, "laptop/a", target)
+	tracker.release("pool", target)
+
+	// Recovery puts the preferred node back in front.
+	delete(down, "laptop")
+	delete(down, "desktop")
+	target, err = strategySpillover("pool", tracker, nil, allowed)
+	require.NoError(t, err)
+	assert.Equal(t, "laptop/a", target)
 }

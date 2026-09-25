@@ -345,3 +345,27 @@ peers:
 		t.Fatalf("LoadConfigFromReader error = %v, want peer FQN conflict", err)
 	}
 }
+
+func TestPeerConfig_HealthCheckValidation(t *testing.T) {
+	load := func(extra string) error {
+		_, err := LoadConfigFromReader(strings.NewReader(`
+peers:
+  p:
+    proxy: http://example.com
+    models: [m]
+` + extra))
+		return err
+	}
+	if err := load(""); err != nil {
+		t.Fatalf("defaults: %v", err)
+	}
+	if err := load("    healthCheckPath: /running\n    healthCheckInterval: 5\n"); err != nil {
+		t.Fatalf("valid probe: %v", err)
+	}
+	if err := load("    healthCheckPath: running\n"); err == nil {
+		t.Fatal("expected a path without a leading slash to be rejected")
+	}
+	if err := load("    healthCheckInterval: 0\n"); err == nil {
+		t.Fatal("expected a zero interval to be rejected")
+	}
+}

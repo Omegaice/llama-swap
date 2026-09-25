@@ -51,6 +51,12 @@ type PeerConfig struct {
 	Models     []string `yaml:"models"`
 	Filters    Filters  `yaml:"filters"`
 
+	// HealthCheckPath, when set, is probed on the peer every
+	// HealthCheckInterval seconds and the result gates routing to it. Empty
+	// leaves the peer passive: only a failed forward marks it down.
+	HealthCheckPath     string `yaml:"healthCheckPath"`
+	HealthCheckInterval int    `yaml:"healthCheckInterval"`
+
 	// ModelSettings decorates declared models, keyed by model ID. Every key
 	// must name an entry in Models; models left out keep whatever the peer
 	// itself publishes.
@@ -243,6 +249,9 @@ func (c *PeerConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		Filters:       Filters{},
 		ModelSettings: map[string]PeerModelSettings{},
 
+		HealthCheckPath:     "",
+		HealthCheckInterval: 30,
+
 		// Mostly matches http.DefaultTransport. HTTP peers retain the 60s
 		// response-header timeout from before PR #619.
 		Timeouts: TimeoutsConfig{
@@ -271,6 +280,13 @@ func (c *PeerConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	defaults.ProxyURL = parsedURL
 	if err := validatePeerTailcat(&defaults); err != nil {
 		return err
+	}
+
+	if defaults.HealthCheckPath != "" && !strings.HasPrefix(defaults.HealthCheckPath, "/") {
+		return fmt.Errorf("healthCheckPath must start with /: %q", defaults.HealthCheckPath)
+	}
+	if defaults.HealthCheckInterval < 1 {
+		return fmt.Errorf("healthCheckInterval must be >= 1 second")
 	}
 
 	// Validate models is not empty

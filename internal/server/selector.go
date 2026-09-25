@@ -27,6 +27,7 @@ type spilloverTarget struct {
 	target  string
 	modelID string
 	local   bool
+	peerID  string // set for a peer target
 }
 
 type selectorSpilloverState struct {
@@ -54,14 +55,17 @@ func newSelectorSpilloverTracker(cfg config.Config) *selectorSpilloverTracker {
 		}
 		for _, target := range selector.Targets {
 			modelID, local := cfg.RealModelName(target)
+			var peerID string
 			if !local {
-				peerID, peerModelID, _ := cfg.ResolvePeerModel(target)
+				var peerModelID string
+				peerID, peerModelID, _ = cfg.ResolvePeerModel(target)
 				modelID = config.PeerModelFQN(peerID, peerModelID)
 			}
 			state.targets = append(state.targets, spilloverTarget{
 				target:  target,
 				modelID: modelID,
 				local:   local,
+				peerID:  peerID,
 			})
 		}
 		tracker.states[selectorID] = state
@@ -116,7 +120,7 @@ func CreateSelectorMiddleware(s *Server) chain.Middleware {
 			case config.SelectorStrategyWarm:
 				target, err = strategyWarm(s.cfg, selector, s.local.RunningModels())
 			case config.SelectorStrategySpillover:
-				target, err = strategySpillover(model, spillovers, s.local.RunningModels())
+				target, err = strategySpillover(model, spillovers, s.local.RunningModels(), s.peerHealth.Allow)
 			default:
 				err = fmt.Errorf("unknown selector strategy %q", selector.Strategy)
 			}
@@ -178,7 +182,11 @@ func strategyWarm(cfg config.Config, selector config.SelectorConfig, running map
 	return selector.Targets[0], nil
 }
 
-func strategySpillover(selectorID string, tracker *selectorSpilloverTracker, running map[string]process.ProcessState) (string, error) {
+// strategySpillover fills targets in order up to the reservation count. Peer
+// targets whose peer is down are left out while any other target remains;
+// when every target is down the choice falls back to the full list so the
+// request reaches the peer router, which refuses it with a 503 naming the peer.
+func strategySpillover(selectorID string, tracker *selectorSpilloverTracker, running map[string]process.ProcessState, peerAllowed func(peerID string) bool) (string, error) {
 	if tracker == nil || tracker.states[selectorID] == nil {
 		return "", fmt.Errorf("spillover selector %q is not configured", selectorID)
 	}
@@ -186,9 +194,22 @@ func strategySpillover(selectorID string, tracker *selectorSpilloverTracker, run
 	state.mu.Lock()
 	defer state.mu.Unlock()
 
+	candidates := state.targets
+	if peerAllowed != nil {
+		up := make([]spilloverTarget, 0, len(state.targets))
+		for _, target := range state.targets {
+			if target.local || peerAllowed(target.peerID) {
+				up = append(up, target)
+			}
+		}
+		if len(up) > 0 {
+			candidates = up
+		}
+	}
+
 	active := make([]spilloverTarget, 0, len(state.targets))
 	cold := make([]spilloverTarget, 0, len(state.targets))
-	for _, target := range state.targets {
+	for _, target := range candidates {
 		if !target.local {
 			if state.inflight[target.modelID] > 0 {
 				active = append(active, target)

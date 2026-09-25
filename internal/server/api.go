@@ -504,3 +504,10 @@ func (s *Server) handleUpstream(w http.ResponseWriter, r *http.Request) {
 		swaputil.SendResponse(w, r, http.StatusNotFound, "no router for model "+modelID)
 	}
 }
+
+// handleAPIPeers reports every peer's health: whether it is probed, up or
+// down, when it last answered, and the process states its last probe returned.
+func (s *Server) handleAPIPeers(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"peers": s.peerHealth.Snapshot()})
+}

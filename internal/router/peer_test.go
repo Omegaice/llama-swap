@@ -828,3 +828,66 @@ peers:
 		t.Fatalf("Shutdown: %v", err)
 	}
 }
+
+type stubPeerHealth struct {
+	allow bool
+	ups   []string
+	downs []string
+}
+
+func (h *stubPeerHealth) Allow(string) bool               { return h.allow }
+func (h *stubPeerHealth) MarkUp(peerID string)            { h.ups = append(h.ups, peerID) }
+func (h *stubPeerHealth) MarkDown(peerID string, _ error) { h.downs = append(h.downs, peerID) }
+
+func TestPeer_ServeHTTP_HealthGate(t *testing.T) {
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer testServer.Close()
+
+	proxyURL, _ := url.Parse(testServer.URL)
+	pr, err := NewPeer(config.Config{Peers: config.PeerDictionaryConfig{
+		"peer1": config.PeerConfig{Proxy: testServer.URL, ProxyURL: proxyURL, Models: []string{"m"}},
+	}}, testLogger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	health := &stubPeerHealth{allow: false}
+	pr.SetHealth(health)
+
+	newReq := func() *http.Request {
+		req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		return req.WithContext(swaputil.SetContext(req.Context(), swaputil.ReqContextData{Model: "m", ModelID: "m"}))
+	}
+
+	w := httptest.NewRecorder()
+	pr.ServeHTTP(w, newReq())
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("down peer: status = %d, want 503", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "peer1 is down") {
+		t.Fatalf("down peer: body = %q", w.Body.String())
+	}
+
+	// An error status from the peer still counts as the peer answering.
+	health.allow = true
+	w = httptest.NewRecorder()
+	pr.ServeHTTP(w, newReq())
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("allowed: status = %d, want 500 from the peer", w.Code)
+	}
+	if len(health.ups) != 1 || health.ups[0] != "peer1" || len(health.downs) != 0 {
+		t.Fatalf("expected one MarkUp for peer1, got ups=%v downs=%v", health.ups, health.downs)
+	}
+
+	// A dead endpoint marks the peer down.
+	testServer.Close()
+	w = httptest.NewRecorder()
+	pr.ServeHTTP(w, newReq())
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("dead peer: status = %d, want 502", w.Code)
+	}
+	if len(health.downs) != 1 || health.downs[0] != "peer1" {
+		t.Fatalf("expected one MarkDown for peer1, got %v", health.downs)
+	}
+}

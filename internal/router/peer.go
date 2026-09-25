@@ -33,12 +33,24 @@ type peerRoute struct {
 	modelID string
 }
 
+// PeerHealth is what the peer router consults before forwarding and informs
+// after. A nil PeerHealth allows everything and records nothing.
+type PeerHealth interface {
+	// Allow reports whether the peer may receive a request right now.
+	Allow(peerID string) bool
+	// MarkUp records that the peer answered, whatever it answered.
+	MarkUp(peerID string)
+	// MarkDown records that the peer could not be reached.
+	MarkDown(peerID string, err error)
+}
+
 type Peer struct {
 	cfg     config.Config
 	logger  *logmon.Monitor
 	peers   map[string]*peerRoute
 	members []*peerMember
 	byID    map[string]*peerMember
+	health  PeerHealth
 
 	shutdownCtx  context.Context
 	shutdownFn   context.CancelFunc
@@ -49,6 +61,15 @@ type Peer struct {
 func NewPeer(cfg config.Config, logger *logmon.Monitor) (*Peer, error) {
 	if err := config.ValidatePeerNamespace(cfg); err != nil {
 		return nil, err
+	}
+
+	// Built first so each proxy's hooks can reach the health gate installed later.
+	shutdownCtx, shutdownFn := context.WithCancel(context.Background())
+	p := &Peer{
+		cfg:         cfg,
+		logger:      logger,
+		shutdownCtx: shutdownCtx,
+		shutdownFn:  shutdownFn,
 	}
 
 	peers := cfg.Peers
@@ -117,6 +138,10 @@ func NewPeer(cfg config.Config, logger *logmon.Monitor) (*Peer, error) {
 		}
 
 		reverseProxy.ModifyResponse = func(resp *http.Response) error {
+			if p.health != nil {
+				p.health.MarkUp(peerID)
+			}
+
 			// The peer is another llama-swap that already applied its own CORS
 			// policy. ReverseProxy adds rather than replaces headers, so keep
 			// only this instance's; see issue #85.
@@ -135,6 +160,10 @@ func NewPeer(cfg config.Config, logger *logmon.Monitor) (*Peer, error) {
 				logger.Debugf("peer %s: request cancelled: %v", peerID, err)
 			} else {
 				logger.Warnf("peer %s: proxy error: %v", peerID, err)
+			}
+
+			if p.health != nil && !errors.Is(err, context.Canceled) && r.Context().Err() == nil {
+				p.health.MarkDown(peerID, err)
 			}
 
 			// Only a client that actually hung up gets the recorded-only
@@ -181,18 +210,24 @@ func NewPeer(cfg config.Config, logger *logmon.Monitor) (*Peer, error) {
 		modelMap[modelID] = routes[0]
 	}
 
-	shutdownCtx, shutdownFn := context.WithCancel(context.Background())
+	p.peers = modelMap
+	p.members = members
+	p.byID = byID
+	return p, nil
+}
 
-	r := &Peer{
-		cfg:         cfg,
-		logger:      logger,
-		peers:       modelMap,
-		members:     members,
-		byID:        byID,
-		shutdownCtx: shutdownCtx,
-		shutdownFn:  shutdownFn,
+// SetHealth installs the health gate consulted before each forward.
+func (r *Peer) SetHealth(health PeerHealth) {
+	r.health = health
+}
+
+// PeerFor returns the peer id that serves the routed model name.
+func (r *Peer) PeerFor(model string) (string, bool) {
+	route, ok := r.peers[model]
+	if !ok {
+		return "", false
 	}
-	return r, nil
+	return route.member.peerID, true
 }
 
 func (r *Peer) Handles(model string) bool {
@@ -326,6 +361,12 @@ func (r *Peer) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	pp := route.member
+
+	if r.health != nil && !r.health.Allow(pp.peerID) {
+		r.logger.Warnf("peer %s: down, refusing %s", pp.peerID, data.ModelID)
+		swaputil.SendResponse(w, req, http.StatusServiceUnavailable, fmt.Sprintf("peer %s is down", pp.peerID))
+		return
+	}
 
 	r.logger.Debugf("peer: routing model %s to peer %s as %s", data.ModelID, pp.peerID, route.modelID)
 

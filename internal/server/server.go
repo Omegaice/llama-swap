@@ -71,6 +71,8 @@ type Server struct {
 	local router.LocalRouter
 	peer  router.Router
 
+	peerListings peerListingCache
+
 	mux     *http.ServeMux
 	handler http.Handler
 

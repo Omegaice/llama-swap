@@ -234,8 +234,22 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 				resolvedPeer == peerID && resolvedModel == modelID {
 				modelIDs[modelID] = struct{}{}
 			}
+		}
+
+		// The peer's own listing is the authority on what it serves; the
+		// declared models only shape routing fallbacks and this degraded
+		// listing when the peer cannot be reached.
+		if records, ok := s.peerListings.records(peerID, peer); ok {
+			for _, rec := range records {
+				modelIDs[rec.ID] = struct{}{}
+				data = append(data, rec)
+			}
+			continue
+		}
+
+		for _, modelID := range peer.Models {
 			data = append(data, newRecord(
-				fqn,
+				config.PeerModelFQN(peerID, modelID),
 				peerID+": "+modelID,
 				"",
 				nil,

@@ -38,6 +38,7 @@ type Peer struct {
 	logger  *logmon.Monitor
 	peers   map[string]*peerRoute
 	members []*peerMember
+	byID    map[string]*peerMember
 
 	shutdownCtx  context.Context
 	shutdownFn   context.CancelFunc
@@ -53,6 +54,7 @@ func NewPeer(cfg config.Config, logger *logmon.Monitor) (*Peer, error) {
 	peers := cfg.Peers
 	modelMap := make(map[string]*peerRoute)
 	bareRoutes := make(map[string][]*peerRoute)
+	byID := make(map[string]*peerMember)
 
 	peerIDs := make([]string, 0, len(peers))
 	tailcatClients := make(map[string]*tailcat.Client)
@@ -157,6 +159,7 @@ func NewPeer(cfg config.Config, logger *logmon.Monitor) (*Peer, error) {
 			apiKey:       peer.ApiKey,
 		}
 		members = append(members, pp)
+		byID[peerID] = pp
 
 		seen := make(map[string]struct{})
 		for _, modelID := range peer.Models {
@@ -188,6 +191,7 @@ func NewPeer(cfg config.Config, logger *logmon.Monitor) (*Peer, error) {
 		logger:      logger,
 		peers:       modelMap,
 		members:     members,
+		byID:        byID,
 		shutdownCtx: shutdownCtx,
 		shutdownFn:  shutdownFn,
 	}
@@ -195,8 +199,31 @@ func NewPeer(cfg config.Config, logger *logmon.Monitor) (*Peer, error) {
 }
 
 func (r *Peer) Handles(model string) bool {
-	_, ok := r.peers[model]
+	if _, ok := r.peers[model]; ok {
+		return true
+	}
+	_, ok := r.prefixRoute(model)
 	return ok
+}
+
+// prefixRoute resolves an undeclared <peerID>/<modelID> name so the models a
+// peer's forwarded /v1/models listing advertises stay reachable without being
+// declared here first; the request is forwarded with the prefix stripped.
+// Peer and model IDs may both contain slashes, so the longest matching peer
+// prefix wins. Local models are dispatched before peers, so a local ID that
+// happens to look like a peer name keeps resolving locally.
+func (r *Peer) prefixRoute(model string) (*peerRoute, bool) {
+	var bestID string
+	var best *peerMember
+	for peerID, member := range r.byID {
+		if len(peerID) >= len(bestID) && strings.HasPrefix(model, peerID+"/") {
+			bestID, best = peerID, member
+		}
+	}
+	if best == nil || len(model) == len(bestID)+1 {
+		return nil, false
+	}
+	return &peerRoute{member: best, modelID: model[len(bestID)+1:]}, true
 }
 
 func (r *Peer) Shutdown(timeout time.Duration) error {
@@ -293,6 +320,9 @@ func (r *Peer) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	route, found := r.peers[data.ModelID]
+	if !found {
+		route, found = r.prefixRoute(data.ModelID)
+	}
 	if !found {
 		r.logger.Warnf("peer model not found: %s", data.ModelID)
 		swaputil.SendError(w, req, ErrNoPeerModelFound)

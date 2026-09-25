@@ -28,6 +28,12 @@ type SelectorConfig struct {
 	Description string           `yaml:"description" json:"description"`
 	Unlisted    bool             `yaml:"unlisted" json:"unlisted"`
 	Metadata    map[string]any   `yaml:"metadata" json:"metadata"`
+
+	// Capabilities renders the same /v1/models fields it does for a model:
+	// architecture, capabilities, supported_parameters, context_length. A
+	// selector over targets that differ in them publishes what a client may
+	// assume of the pool as a whole.
+	Capabilities ModelCapConfig `yaml:"capabilities" json:"capabilities"`
 }
 
 // UnmarshalYAML applies selector defaults while retaining the distinction

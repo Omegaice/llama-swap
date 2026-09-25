@@ -274,7 +274,7 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 			selector.Name,
 			selector.Description,
 			selector.Metadata,
-			config.ModelCapConfig{},
+			selector.Capabilities,
 			status,
 			internalMetadata,
 		))

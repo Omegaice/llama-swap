@@ -227,36 +227,19 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for peerID, peer := range s.cfg.Peers {
-		for _, modelID := range peer.Models {
-			fqn := config.PeerModelFQN(peerID, modelID)
-			modelIDs[fqn] = struct{}{}
-			if resolvedPeer, resolvedModel, found := s.cfg.ResolvePeerModel(modelID); found &&
-				resolvedPeer == peerID && resolvedModel == modelID {
-				modelIDs[modelID] = struct{}{}
+		// Aliases are routable names too, so they reserve their fully
+		// qualified form and, when unambiguous, their bare one.
+		for _, routable := range peer.RoutableNames() {
+			modelIDs[config.PeerModelFQN(peerID, routable.Name)] = struct{}{}
+			if resolvedPeer, resolvedModel, found := s.cfg.ResolvePeerModel(routable.Name); found &&
+				resolvedPeer == peerID && resolvedModel == routable.Name {
+				modelIDs[routable.Name] = struct{}{}
 			}
 		}
 
-		// The peer's own listing is the authority on what it serves; the
-		// declared models only shape routing fallbacks and this degraded
-		// listing when the peer cannot be reached.
-		if records, ok := s.peerListings.records(peerID, peer); ok {
-			for _, rec := range records {
-				modelIDs[rec.ID] = struct{}{}
-				data = append(data, rec)
-			}
-			continue
-		}
-
-		for _, modelID := range peer.Models {
-			data = append(data, newRecord(
-				config.PeerModelFQN(peerID, modelID),
-				peerID+": "+modelID,
-				"",
-				nil,
-				config.ModelCapConfig{},
-				"unloaded",
-				map[string]any{"type": "peer", "peerID": peerID},
-			))
+		for _, rec := range s.composePeerRecords(peerID, peer, created) {
+			modelIDs[rec.ID] = struct{}{}
+			data = append(data, rec)
 		}
 	}
 

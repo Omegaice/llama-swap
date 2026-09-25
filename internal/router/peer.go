@@ -161,16 +161,13 @@ func NewPeer(cfg config.Config, logger *logmon.Monitor) (*Peer, error) {
 		members = append(members, pp)
 		byID[peerID] = pp
 
-		seen := make(map[string]struct{})
-		for _, modelID := range peer.Models {
-			if _, duplicate := seen[modelID]; duplicate {
-				continue
-			}
-			seen[modelID] = struct{}{}
-
-			route := &peerRoute{member: pp, modelID: modelID}
-			modelMap[config.PeerModelFQN(peerID, modelID)] = route
-			bareRoutes[modelID] = append(bareRoutes[modelID], route)
+		// RoutableNames covers declared models and their aliases; the route
+		// carries the upstream name, so an alias reaches the peer as the model
+		// it decorates rather than as a name the peer never published.
+		for _, routable := range peer.RoutableNames() {
+			route := &peerRoute{member: pp, modelID: peer.UpstreamName(routable.ModelID)}
+			modelMap[config.PeerModelFQN(peerID, routable.Name)] = route
+			bareRoutes[routable.Name] = append(bareRoutes[routable.Name], route)
 		}
 	}
 

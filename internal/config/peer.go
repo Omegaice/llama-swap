@@ -10,6 +10,39 @@ import (
 )
 
 type PeerDictionaryConfig map[string]PeerConfig
+
+// PeerModelSettings decorates one of a peer's declared models with the facts
+// llama-swap publishes for its own models. A peer running llama-swap reports
+// all of this in its own /v1/models listing; a peer that does not (vLLM,
+// SGLang, a hosted API) reports a bare id, and this is where the rest is
+// declared instead.
+type PeerModelSettings struct {
+	// SendAs replaces the model name in the request body forwarded upstream.
+	// This is useModelName for peers: it lets a declared model or alias carry
+	// a name the peer itself would not recognize.
+	SendAs string `yaml:"sendAs"`
+
+	// Aliases are additional names routed to this model, addressable fully
+	// qualified and, when unambiguous, bare. With filters.setParamsByID this
+	// is how a peer model grows the per-alias request variants a local model
+	// gets from its own setParamsByID keys.
+	Aliases []string `yaml:"aliases"`
+
+	Name        string `yaml:"name"`
+	Description string `yaml:"description"`
+
+	// Metadata rides along in /v1/models under meta.llamaswap, the same place
+	// a local model's metadata block lands.
+	Metadata map[string]any `yaml:"metadata"`
+
+	// Capabilities renders the same /v1/models fields it does for a local
+	// model: architecture, capabilities, supported_parameters, context_length.
+	Capabilities ModelCapConfig `yaml:"capabilities"`
+
+	// Unlisted hides the model from /v1/models while leaving it routable.
+	Unlisted bool `yaml:"unlisted"`
+}
+
 type PeerConfig struct {
 	Proxy      string   `yaml:"proxy"`
 	ProxyURL   *url.URL `yaml:"-"`
@@ -17,6 +50,11 @@ type PeerConfig struct {
 	TailcatKey string   `yaml:"tailcatKey"`
 	Models     []string `yaml:"models"`
 	Filters    Filters  `yaml:"filters"`
+
+	// ModelSettings decorates declared models, keyed by model ID. Every key
+	// must name an entry in Models; models left out keep whatever the peer
+	// itself publishes.
+	ModelSettings map[string]PeerModelSettings `yaml:"modelSettings"`
 
 	// Timeout settings for proxy connections
 	Timeouts TimeoutsConfig `yaml:"timeouts"`
@@ -37,6 +75,53 @@ func (c PeerConfig) Tailcat() (key, blob string, privateKey *tailcat.PrivateKey,
 
 type rawPeerConfig PeerConfig
 
+// PeerRoutableName pairs a name a peer answers to with the declared model it
+// resolves to. The two differ only for an alias.
+type PeerRoutableName struct {
+	Name    string
+	ModelID string
+}
+
+// RoutableNames returns every name this peer answers to in declaration order:
+// each declared model followed by its aliases. Duplicates are dropped, so the
+// first declaration of a name wins.
+func (p PeerConfig) RoutableNames() []PeerRoutableName {
+	names := make([]PeerRoutableName, 0, len(p.Models))
+	seen := make(map[string]struct{}, len(p.Models))
+
+	add := func(name, modelID string) {
+		if name == "" {
+			return
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return
+		}
+		seen[name] = struct{}{}
+		names = append(names, PeerRoutableName{Name: name, ModelID: modelID})
+	}
+
+	for _, modelID := range p.Models {
+		add(modelID, modelID)
+	}
+	// Aliases follow every declared model so a name that is both a model ID
+	// and some other model's alias resolves to the model.
+	for _, modelID := range p.Models {
+		for _, alias := range p.ModelSettings[modelID].Aliases {
+			add(alias, modelID)
+		}
+	}
+	return names
+}
+
+// UpstreamName returns the model name to place in the request body for a
+// declared model: sendAs when set, the model ID otherwise.
+func (p PeerConfig) UpstreamName(modelID string) string {
+	if settings, ok := p.ModelSettings[modelID]; ok && settings.SendAs != "" {
+		return settings.SendAs
+	}
+	return modelID
+}
+
 // PeerModelFQN returns the fully qualified routing name for a peer model.
 // Peer and model IDs may both contain slashes, so callers must treat the
 // result as an exact configured name rather than parsing it by segments.
@@ -49,19 +134,14 @@ func PeerModelFQN(peerID, modelID string) string {
 // take precedence over unqualified names that happen to contain the same text.
 func (c *Config) ResolvePeerModel(search string) (peerID, modelID string, found bool) {
 	for id, peer := range c.Peers {
-		seen := make(map[string]struct{})
-		for _, model := range peer.Models {
-			if _, duplicate := seen[model]; duplicate {
+		for _, routable := range peer.RoutableNames() {
+			if PeerModelFQN(id, routable.Name) != search {
 				continue
 			}
-			seen[model] = struct{}{}
-			if PeerModelFQN(id, model) != search {
-				continue
-			}
-			if found && (peerID != id || modelID != model) {
+			if found && (peerID != id || modelID != routable.Name) {
 				return "", "", false
 			}
-			peerID, modelID, found = id, model, true
+			peerID, modelID, found = id, routable.Name, true
 		}
 	}
 	if found {
@@ -69,19 +149,14 @@ func (c *Config) ResolvePeerModel(search string) (peerID, modelID string, found 
 	}
 
 	for id, peer := range c.Peers {
-		seen := make(map[string]struct{})
-		for _, model := range peer.Models {
-			if _, duplicate := seen[model]; duplicate {
+		for _, routable := range peer.RoutableNames() {
+			if routable.Name != search {
 				continue
 			}
-			seen[model] = struct{}{}
-			if model != search {
-				continue
-			}
-			if found && (peerID != id || modelID != model) {
+			if found && (peerID != id || modelID != routable.Name) {
 				return "", "", false
 			}
-			peerID, modelID, found = id, model, true
+			peerID, modelID, found = id, routable.Name, true
 		}
 	}
 	return peerID, modelID, found
@@ -103,12 +178,8 @@ func ValidatePeerNamespace(c Config) error {
 	sort.Strings(peerIDs)
 
 	for _, peerID := range peerIDs {
-		seen := make(map[string]struct{})
-		for _, modelID := range c.Peers[peerID].Models {
-			if _, duplicate := seen[modelID]; duplicate {
-				continue
-			}
-			seen[modelID] = struct{}{}
+		for _, routable := range c.Peers[peerID].RoutableNames() {
+			modelID := routable.Name
 
 			fqn := PeerModelFQN(peerID, modelID)
 			if existing, ok := fqnTargets[fqn]; ok {
@@ -166,10 +237,11 @@ func (c *PeerConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		responseHeaderDefault = 300
 	}
 	defaults := rawPeerConfig{
-		Proxy:   "",
-		ApiKey:  "",
-		Models:  []string{},
-		Filters: Filters{},
+		Proxy:         "",
+		ApiKey:        "",
+		Models:        []string{},
+		Filters:       Filters{},
+		ModelSettings: map[string]PeerModelSettings{},
 
 		// Mostly matches http.DefaultTransport. HTTP peers retain the 60s
 		// response-header timeout from before PR #619.
@@ -206,6 +278,57 @@ func (c *PeerConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		return fmt.Errorf("peer models can not be empty")
 	}
 
+	if err := validatePeerModelSettings(PeerConfig(defaults)); err != nil {
+		return err
+	}
+
 	*c = PeerConfig(defaults)
+	return nil
+}
+
+// validatePeerModelSettings rejects a modelSettings block that decorates a
+// model the peer does not declare, or whose aliases collide with another name
+// the same peer already answers to. Both are silent failures otherwise: the
+// settings are simply never consulted, which looks like llama-swap ignoring
+// the config.
+func validatePeerModelSettings(peer PeerConfig) error {
+	declared := make(map[string]struct{}, len(peer.Models))
+	for _, modelID := range peer.Models {
+		declared[modelID] = struct{}{}
+	}
+
+	settingsIDs := make([]string, 0, len(peer.ModelSettings))
+	for modelID := range peer.ModelSettings {
+		settingsIDs = append(settingsIDs, modelID)
+	}
+	sort.Strings(settingsIDs)
+
+	for _, modelID := range settingsIDs {
+		if _, ok := declared[modelID]; !ok {
+			return fmt.Errorf("modelSettings key %q is not one of the peer's models", modelID)
+		}
+		if err := peer.ModelSettings[modelID].Capabilities.Validate(); err != nil {
+			return fmt.Errorf("modelSettings %s: %w", modelID, err)
+		}
+	}
+
+	// RoutableNames drops a duplicate silently, so the collision has to be
+	// caught here rather than read back off the result.
+	taken := make(map[string]string, len(peer.Models))
+	for _, modelID := range peer.Models {
+		taken[modelID] = modelID
+	}
+	for _, modelID := range settingsIDs {
+		for _, alias := range peer.ModelSettings[modelID].Aliases {
+			if alias == "" {
+				return fmt.Errorf("modelSettings %s: alias can not be empty", modelID)
+			}
+			if owner, exists := taken[alias]; exists {
+				return fmt.Errorf("modelSettings %s: alias %q is already used by model %q", modelID, alias, owner)
+			}
+			taken[alias] = modelID
+		}
+	}
+
 	return nil
 }

@@ -150,7 +150,21 @@ func (s *Server) modelStatus() []apiModel {
 
 	for peerID, peer := range s.cfg.Peers {
 		for _, modelID := range peer.Models {
-			models = append(models, apiModel{Id: config.PeerModelFQN(peerID, modelID), PeerID: peerID})
+			settings := peer.ModelSettings[modelID]
+			aliases := make([]string, 0, len(settings.Aliases))
+			for _, alias := range settings.Aliases {
+				aliases = append(aliases, config.PeerModelFQN(peerID, alias))
+			}
+			_, capsMap, _, _ := renderCapabilities(settings.Capabilities)
+			models = append(models, apiModel{
+				Id:           config.PeerModelFQN(peerID, modelID),
+				Name:         settings.Name,
+				Description:  settings.Description,
+				Unlisted:     settings.Unlisted,
+				Aliases:      aliases,
+				Capabilities: capsMap,
+				PeerID:       peerID,
+			})
 		}
 	}
 

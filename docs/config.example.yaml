@@ -817,6 +817,71 @@ peers:
     # can finish; override with timeouts.responseHeader when needed.
     models:
       - model_a
+
+  # A peer that does not run llama-swap publishes a bare model id and nothing
+  # else, so /v1/models cannot tell a client what the model does. modelSettings
+  # declares that half locally.
+  sglang-peer:
+    proxy: http://192.168.1.24:30001
+    apiKey: ${env.SGLANG_API_KEY}
+    models:
+      - qwen3-next
+    # modelSettings: per-model settings keyed by model ID
+    # - optional, default: empty dictionary
+    # - every key must name one of the models above
+    # - models left out keep whatever the peer publishes for them
+    modelSettings:
+      qwen3-next:
+        # sendAs: the model name to put in the request body sent to the peer
+        # - optional, default: the model ID
+        # - this is useModelName for peers: the id above is what clients ask
+        #   for, sendAs is what the peer is asked for
+        sendAs: Qwen/Qwen3-Next-80B-A3B-Instruct
+
+        # aliases: additional names routed to this model
+        # - optional, default: empty array
+        # - addressable as <peer ID>/<alias> and, when unambiguous, bare
+        # - every alias reaches the peer under sendAs, so an alias may carry a
+        #   suffix the peer itself would reject
+        # - pair with filters.setParamsByID below to vary the request per alias
+        aliases:
+          - qwen3-next:think
+          - qwen3-next:nothink
+
+        # name, description: shown in /v1/models
+        # - optional, default: empty string
+        # - name is prefixed with the peer ID, as forwarded names are
+        name: Qwen3 Next 80B
+        description: Served by SGLang
+
+        # capabilities: same block a local model uses
+        # - optional, default: not configured
+        capabilities:
+          in: [text]
+          out: [text]
+          tools: true
+          context: 262144
+
+        # metadata: arbitrary values published under meta.llamaswap
+        # - optional, default: empty dictionary
+        metadata:
+          reasoning: true
+
+        # unlisted: hide from /v1/models but keep it routable
+        # - optional, default: false
+        unlisted: false
+    filters:
+      # Aliases only rename; setParamsByID is what makes them differ. Keys are
+      # the names the client asks for, so they carry the peer prefix.
+      setParamsByID:
+        "sglang-peer/qwen3-next:think":
+          chat_template_kwargs:
+            enable_thinking: true
+        "sglang-peer/qwen3-next:nothink":
+          chat_template_kwargs:
+            enable_thinking: false
+
+
   openrouter:
     proxy: https://openrouter.ai/api
     # apiKey: a string key to be injected into the request

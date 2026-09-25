@@ -40,7 +40,7 @@ func CreateFilterMiddleware(cfg config.Config) chain.Middleware {
 				return
 			}
 
-			useModelName, filters, ok := resolveFilters(cfg, data.Model)
+			useModelName, canonicalID, filters, ok := resolveFilters(cfg, data.Model)
 			if !ok {
 				next.ServeHTTP(w, r)
 				return
@@ -52,7 +52,7 @@ func CreateFilterMiddleware(cfg config.Config) chain.Middleware {
 				return
 			}
 
-			body, err = applyFilters(body, data.Model, useModelName, filters)
+			body, err = applyFilters(body, data.Model, canonicalID, useModelName, filters)
 			if err != nil {
 				swaputil.SendResponse(w, r, http.StatusInternalServerError, err.Error())
 				return
@@ -90,7 +90,7 @@ func CreateFormFilterMiddleware(cfg config.Config) chain.Middleware {
 				return
 			}
 
-			useModelName, _, ok := resolveFilters(cfg, data.Model)
+			useModelName, _, _, ok := resolveFilters(cfg, data.Model)
 			if !ok || useModelName == "" {
 				next.ServeHTTP(w, r)
 				return
@@ -111,23 +111,29 @@ func CreateFormFilterMiddleware(cfg config.Config) chain.Middleware {
 	}
 }
 
-// resolveFilters returns the filter settings for a requested model. UseModelName
-// only applies to local models; peers carry filters but no name rewrite.
-func resolveFilters(cfg config.Config, requested string) (useModelName string, filters config.Filters, ok bool) {
+// resolveFilters returns the filter settings for a requested model, and the
+// name to look setParamsByID up under when the requested spelling has no entry
+// of its own. UseModelName only applies to local models; peers carry filters
+// but no name rewrite.
+func resolveFilters(cfg config.Config, requested string) (useModelName, canonicalID string, filters config.Filters, ok bool) {
 	if realName, found := cfg.RealModelName(requested); found {
 		mc := cfg.Models[realName]
-		return mc.UseModelName, mc.Filters.Filters, true
+		return mc.UseModelName, realName, mc.Filters.Filters, true
 	}
-	if peerID, _, found := cfg.ResolvePeerModel(requested); found {
-		return "", cfg.Peers[peerID].Filters, true
+	// A peer model answers to both its fully qualified name and, when
+	// unambiguous, its bare one. Keying setParamsByID by the fully qualified
+	// name alone is the readable way to write it, so the bare spelling has to
+	// resolve to the same entry or an alias silently loses its parameters.
+	if peerID, modelID, found := cfg.ResolvePeerModel(requested); found {
+		return "", config.PeerModelFQN(peerID, modelID), cfg.Peers[peerID].Filters, true
 	}
-	return "", config.Filters{}, false
+	return "", "", config.Filters{}, false
 }
 
 // applyFilters rewrites the JSON body in place. Order matches the legacy
 // ProxyManager: useModelName, stripParams, setParams, then setParamsByID (which
 // can override setParams).
-func applyFilters(body []byte, requested, useModelName string, f config.Filters) ([]byte, error) {
+func applyFilters(body []byte, requested, canonicalID, useModelName string, f config.Filters) ([]byte, error) {
 	var err error
 
 	if useModelName != "" {
@@ -144,6 +150,9 @@ func applyFilters(body []byte, requested, useModelName string, f config.Filters)
 
 	setParams, setKeys, setSoft := f.SanitizedSetParams()
 	byID, byIDKeys, byIDSoft := f.SanitizedSetParamsByID(requested)
+	if len(byIDKeys) == 0 && canonicalID != "" && canonicalID != requested {
+		byID, byIDKeys, byIDSoft = f.SanitizedSetParamsByID(canonicalID)
+	}
 
 	// Set-if-undefined keys ("key?", issue #1052) only fill parameters the body
 	// does not carry at that point in the pipeline. Filters apply like a pipe —

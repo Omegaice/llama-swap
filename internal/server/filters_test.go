@@ -1,6 +1,7 @@
 package server
 
 import (
+	"strings"
 	"bytes"
 	"io"
 	"mime/multipart"
@@ -15,7 +16,7 @@ import (
 
 func TestServer_ApplyFilters(t *testing.T) {
 	t.Run("useModelName rewrite", func(t *testing.T) {
-		out, err := applyFilters([]byte(`{"model":"alias","temp":1}`), "alias", "real-model", config.Filters{})
+		out, err := applyFilters([]byte(`{"model":"alias","temp":1}`), "alias", "alias", "real-model", config.Filters{})
 		if err != nil {
 			t.Fatalf("applyFilters: %v", err)
 		}
@@ -29,7 +30,7 @@ func TestServer_ApplyFilters(t *testing.T) {
 			StripParams: "temperature",
 			SetParams:   map[string]any{"top_p": 0.9},
 		}
-		out, err := applyFilters([]byte(`{"model":"m","temperature":0.7}`), "m", "", f)
+		out, err := applyFilters([]byte(`{"model":"m","temperature":0.7}`), "m", "m", "", f)
 		if err != nil {
 			t.Fatalf("applyFilters: %v", err)
 		}
@@ -45,7 +46,7 @@ func TestServer_ApplyFilters(t *testing.T) {
 		f := config.Filters{
 			SetParams: map[string]any{"max_tokens?": 32768},
 		}
-		out, err := applyFilters([]byte(`{"model":"m"}`), "m", "", f)
+		out, err := applyFilters([]byte(`{"model":"m"}`), "m", "m", "", f)
 		if err != nil {
 			t.Fatalf("applyFilters: %v", err)
 		}
@@ -58,7 +59,7 @@ func TestServer_ApplyFilters(t *testing.T) {
 		f := config.Filters{
 			SetParams: map[string]any{"max_tokens?": 32768},
 		}
-		out, err := applyFilters([]byte(`{"model":"m","max_tokens":64}`), "m", "", f)
+		out, err := applyFilters([]byte(`{"model":"m","max_tokens":64}`), "m", "m", "", f)
 		if err != nil {
 			t.Fatalf("applyFilters: %v", err)
 		}
@@ -75,7 +76,7 @@ func TestServer_ApplyFilters(t *testing.T) {
 				"stop?":       "</s>",
 			},
 		}
-		out, err := applyFilters([]byte(`{"model":"m","max_tokens":0,"stream":false,"stop":null}`), "m", "", f)
+		out, err := applyFilters([]byte(`{"model":"m","max_tokens":0,"stream":false,"stop":null}`), "m", "m", "", f)
 		if err != nil {
 			t.Fatalf("applyFilters: %v", err)
 		}
@@ -95,7 +96,7 @@ func TestServer_ApplyFilters(t *testing.T) {
 			StripParams: "temperature",
 			SetParams:   map[string]any{"temperature?": 0.2},
 		}
-		out, err := applyFilters([]byte(`{"model":"m","temperature":0.7}`), "m", "", f)
+		out, err := applyFilters([]byte(`{"model":"m","temperature":0.7}`), "m", "m", "", f)
 		if err != nil {
 			t.Fatalf("applyFilters: %v", err)
 		}
@@ -111,7 +112,7 @@ func TestServer_ApplyFilters(t *testing.T) {
 
 		// Nested value present: the check finds it at the path the write
 		// would target, so the configured value yields.
-		out, err := applyFilters([]byte(`{"model":"m","chat_template_kwargs":{"enable_thinking":false}}`), "m", "", f)
+		out, err := applyFilters([]byte(`{"model":"m","chat_template_kwargs":{"enable_thinking":false}}`), "m", "m", "", f)
 		if err != nil {
 			t.Fatalf("applyFilters: %v", err)
 		}
@@ -121,7 +122,7 @@ func TestServer_ApplyFilters(t *testing.T) {
 
 		// Absent: the configured value writes the nested location, exactly
 		// where a hard setParams key would write.
-		out, err = applyFilters([]byte(`{"model":"m"}`), "m", "", f)
+		out, err = applyFilters([]byte(`{"model":"m"}`), "m", "m", "", f)
 		if err != nil {
 			t.Fatalf("applyFilters: %v", err)
 		}
@@ -140,7 +141,7 @@ func TestServer_ApplyFilters(t *testing.T) {
 		}
 
 		for _, body := range []string{`{"model":"alias"}`, `{"model":"alias","top_p":0.9}`} {
-			out, err := applyFilters([]byte(body), "alias", "", f)
+			out, err := applyFilters([]byte(body), "alias", "alias", "", f)
 			if err != nil {
 				t.Fatalf("applyFilters(%s): %v", body, err)
 			}
@@ -164,7 +165,7 @@ func TestServer_ApplyFilters(t *testing.T) {
 		}
 
 		for _, requested := range []string{"my-model", "my-model:high"} {
-			out, err := applyFilters([]byte(`{"model":"m","max_tokens":999}`), requested, "", f)
+			out, err := applyFilters([]byte(`{"model":"m","max_tokens":999}`), requested, requested, "", f)
 			if err != nil {
 				t.Fatalf("applyFilters(%s): %v", requested, err)
 			}
@@ -179,7 +180,7 @@ func TestServer_ApplyFilters(t *testing.T) {
 			SetParams:     map[string]any{"top_p": 0.5},
 			SetParamsByID: map[string]map[string]any{"alias": {"top_p": 0.1}},
 		}
-		out, err := applyFilters([]byte(`{"model":"alias"}`), "alias", "", f)
+		out, err := applyFilters([]byte(`{"model":"alias"}`), "alias", "alias", "", f)
 		if err != nil {
 			t.Fatalf("applyFilters: %v", err)
 		}
@@ -198,7 +199,7 @@ func TestServer_ResolveFilters_QualifiedPeer(t *testing.T) {
 		},
 	}}
 
-	useModelName, got, ok := resolveFilters(cfg, "remote/org/model")
+	useModelName, canonicalID, got, ok := resolveFilters(cfg, "remote/org/model")
 	if !ok {
 		t.Fatal("qualified peer filters were not resolved")
 	}
@@ -207,6 +208,41 @@ func TestServer_ResolveFilters_QualifiedPeer(t *testing.T) {
 	}
 	if got.StripParams != want.StripParams {
 		t.Fatalf("StripParams = %q, want %q", got.StripParams, want.StripParams)
+	}
+	if canonicalID != "remote/org/model" {
+		t.Fatalf("canonicalID = %q, want remote/org/model", canonicalID)
+	}
+}
+
+// A peer model addressed by its bare name picks up the setParamsByID entry
+// written against its fully qualified one.
+func TestServer_ResolveFilters_BareNameUsesQualifiedParams(t *testing.T) {
+	cfg := config.Config{Peers: config.PeerDictionaryConfig{
+		"spark": {
+			Models: []string{"flash"},
+			ModelSettings: map[string]config.PeerModelSettings{
+				"flash": {Aliases: []string{"flash:nothink"}},
+			},
+			Filters: config.Filters{SetParamsByID: map[string]map[string]any{
+				"spark/flash:nothink": {"chat_template_kwargs": map[string]any{"enable_thinking": false}},
+			}},
+		},
+	}}
+
+	_, canonicalID, filters, ok := resolveFilters(cfg, "flash:nothink")
+	if !ok {
+		t.Fatal("bare peer alias did not resolve")
+	}
+	if canonicalID != "spark/flash:nothink" {
+		t.Fatalf("canonicalID = %q", canonicalID)
+	}
+
+	out, err := applyFilters([]byte(`{"model":"flash:nothink"}`), "flash:nothink", canonicalID, "", filters)
+	if err != nil {
+		t.Fatalf("applyFilters: %v", err)
+	}
+	if !strings.Contains(string(out), `"enable_thinking":false`) {
+		t.Fatalf("params not applied: %s", out)
 	}
 }
 

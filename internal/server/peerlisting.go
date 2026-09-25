@@ -17,13 +17,26 @@ import (
 // forwarded record differs from the remote one only in its ID and aliases
 // (fully qualified with the peer prefix), its name, and a peerID marker in
 // meta.llamaswap. The fetch is cached briefly and the listing falls back to
-// bare records synthesized from the declared models when the peer is
-// unreachable, so a down peer neither stalls nor empties the listing.
+// records synthesized from the declared models when the peer is unreachable,
+// so a down peer neither stalls nor empties the listing.
+//
+// A peer that does not run llama-swap publishes a bare id and nothing else.
+// peers.<id>.modelSettings fills that half in from config, and takes
+// precedence over the peer's own record for the fields it declares.
 
 const (
 	peerListingTTL     = 15 * time.Second
 	peerListingTimeout = 3 * time.Second
 )
+
+// peerLiveRecord is one model from a peer's own listing, still carrying the
+// name the peer knows it by. Qualification happens at compose time, where the
+// declared model that claims this record is known.
+type peerLiveRecord struct {
+	upstreamID string
+	aliases    []string // the peer's own alias names, unqualified
+	rec        modelRecord
+}
 
 type peerListingCache struct {
 	mu      sync.Mutex
@@ -32,12 +45,12 @@ type peerListingCache struct {
 
 type peerListingEntry struct {
 	fetched time.Time
-	records []modelRecord // nil when the last fetch failed
+	records []peerLiveRecord // nil when the last fetch failed
 }
 
-// records returns the peer's transformed listing, refetching when the cached
-// copy (including a cached failure) is older than the TTL.
-func (c *peerListingCache) records(peerID string, peer config.PeerConfig) ([]modelRecord, bool) {
+// records returns the peer's listing, refetching when the cached copy
+// (including a cached failure) is older than the TTL.
+func (c *peerListingCache) records(peerID string, peer config.PeerConfig) ([]peerLiveRecord, bool) {
 	c.mu.Lock()
 	entry, ok := c.entries[peerID]
 	c.mu.Unlock()
@@ -58,7 +71,7 @@ func (c *peerListingCache) records(peerID string, peer config.PeerConfig) ([]mod
 	return records, records != nil
 }
 
-func fetchPeerListing(peerID string, peer config.PeerConfig) ([]modelRecord, error) {
+func fetchPeerListing(peerID string, peer config.PeerConfig) ([]peerLiveRecord, error) {
 	// A config built without UnmarshalYAML (tests, embedding) has no parsed URL
 	if peer.ProxyURL == nil {
 		return nil, fmt.Errorf("peer %s has no proxy URL", peerID)
@@ -92,31 +105,30 @@ func fetchPeerListing(peerID string, peer config.PeerConfig) ([]modelRecord, err
 		return nil, err
 	}
 
-	records := make([]modelRecord, 0, len(listing.Data))
+	records := make([]peerLiveRecord, 0, len(listing.Data))
 	for _, rec := range listing.Data {
-		meta, chained := annotatePeerMeta(rec.Meta, peerID)
+		meta, aliases, chained := annotatePeerMeta(rec.Meta, peerID)
 		// A record the peer itself federated already carries a peerID; the
 		// chain can reflect this server's own models back, so only first-hop
 		// models are forwarded.
 		if chained {
 			continue
 		}
-		name := rec.Name
-		if name == "" {
-			name = rec.ID
+		upstreamID := rec.ID
+		if rec.Name == "" {
+			rec.Name = upstreamID
 		}
-		rec.ID = config.PeerModelFQN(peerID, rec.ID)
-		rec.Name = peerID + ": " + name
 		rec.Meta = meta
-		records = append(records, rec)
+		records = append(records, peerLiveRecord{upstreamID: upstreamID, aliases: aliases, rec: rec})
 	}
 	return records, nil
 }
 
-// annotatePeerMeta clones meta with meta.llamaswap.peerID set and every
-// meta.llamaswap.aliases entry fully qualified, reporting whether the record
-// already belonged to a further peer.
-func annotatePeerMeta(meta map[string]any, peerID string) (map[string]any, bool) {
+// annotatePeerMeta clones meta with meta.llamaswap.peerID set, returning the
+// peer's own alias names and whether the record already belonged to a further
+// peer. Aliases are left unqualified; composePeerRecords qualifies whichever
+// set survives.
+func annotatePeerMeta(meta map[string]any, peerID string) (map[string]any, []string, bool) {
 	out := make(map[string]any, len(meta)+1)
 	for k, v := range meta {
 		out[k] = v
@@ -125,26 +137,191 @@ func annotatePeerMeta(meta map[string]any, peerID string) (map[string]any, bool)
 	inner := make(map[string]any)
 	if existing, ok := out["llamaswap"].(map[string]any); ok {
 		if _, chained := existing["peerID"]; chained {
-			return nil, true
+			return nil, nil, true
 		}
 		for k, v := range existing {
 			inner[k] = v
 		}
 	}
 
-	if aliases, ok := inner["aliases"].([]any); ok {
-		qualified := make([]any, len(aliases))
-		for i, alias := range aliases {
+	var aliases []string
+	if raw, ok := inner["aliases"].([]any); ok {
+		for _, alias := range raw {
 			if s, ok := alias.(string); ok {
-				qualified[i] = config.PeerModelFQN(peerID, s)
-			} else {
-				qualified[i] = alias
+				aliases = append(aliases, s)
 			}
 		}
-		inner["aliases"] = qualified
 	}
 
 	inner["peerID"] = peerID
 	out["llamaswap"] = inner
-	return out, false
+	return out, aliases, false
+}
+
+// composePeerRecords builds a peer's slice of /v1/models. Every declared model
+// is listed with its modelSettings applied over whatever the peer publishes
+// for it, and models the peer publishes but the config never declared are
+// forwarded as they arrive, so a llama-swap peer still needs no declaration to
+// be discoverable.
+func (s *Server) composePeerRecords(peerID string, peer config.PeerConfig, created int64) []modelRecord {
+	live, _ := s.peerListings.records(peerID, peer)
+
+	byUpstream := make(map[string]peerLiveRecord, len(live))
+	// A declared model that the peer serves as an alias of another model is
+	// already advertised by that model's record; listing it again would
+	// duplicate it under two ids.
+	covered := make(map[string]struct{}, len(live))
+	for _, entry := range live {
+		byUpstream[entry.upstreamID] = entry
+		covered[entry.upstreamID] = struct{}{}
+		for _, alias := range entry.aliases {
+			covered[alias] = struct{}{}
+		}
+	}
+
+	data := make([]modelRecord, 0, len(live)+len(peer.Models))
+	claimed := make(map[string]struct{}, len(peer.Models))
+
+	for _, modelID := range peer.Models {
+		settings := peer.ModelSettings[modelID]
+		upstream := peer.UpstreamName(modelID)
+
+		entry, hasLive := byUpstream[upstream]
+		if hasLive {
+			claimed[upstream] = struct{}{}
+		} else if _, isRemoteAlias := covered[upstream]; isRemoteAlias {
+			continue
+		} else {
+			entry = peerLiveRecord{rec: peerFallbackRecord(peerID, modelID, created)}
+		}
+
+		if settings.Unlisted {
+			continue
+		}
+
+		aliases := settings.Aliases
+		if len(aliases) == 0 {
+			aliases = entry.aliases
+		}
+		rec := applyPeerModelSettings(entry.rec, settings)
+		rec.Status = peerStatus(rec.Status)
+		rec.ID = config.PeerModelFQN(peerID, modelID)
+		rec.Name = peerID + ": " + rec.Name
+		rec.Meta = withPeerAliases(rec.Meta, peerID, aliases)
+		data = append(data, rec)
+
+		if s.cfg.IncludeAliasesInList {
+			for _, alias := range settings.Aliases {
+				aliasRec := rec
+				aliasRec.ID = config.PeerModelFQN(peerID, alias)
+				aliasRec.Meta = withPeerAliases(rec.Meta, peerID, nil)
+				data = append(data, aliasRec)
+			}
+		}
+	}
+
+	// Whatever the peer serves that the config never named.
+	for _, entry := range live {
+		if _, ok := claimed[entry.upstreamID]; ok {
+			continue
+		}
+		rec := entry.rec
+		rec.Status = peerStatus(rec.Status)
+		rec.ID = config.PeerModelFQN(peerID, entry.upstreamID)
+		rec.Name = peerID + ": " + rec.Name
+		rec.Meta = withPeerAliases(rec.Meta, peerID, entry.aliases)
+		data = append(data, rec)
+	}
+
+	return data
+}
+
+// peerStatus fills in the status a peer that is not llama-swap does not
+// report. A model in a peer's own listing is one it is prepared to serve, and
+// a client that reads status to decide what is available should not have to
+// treat a missing one as a third state.
+func peerStatus(status map[string]any) map[string]any {
+	if len(status) > 0 {
+		return status
+	}
+	return map[string]any{"value": "loaded"}
+}
+
+// peerFallbackRecord is the record for a declared model the peer is not
+// currently publishing, either because it is unreachable or because it no
+// longer serves that name.
+func peerFallbackRecord(peerID, modelID string, created int64) modelRecord {
+	return modelRecord{
+		ID:      config.PeerModelFQN(peerID, modelID),
+		Object:  "model",
+		Created: created,
+		OwnedBy: "llama-swap",
+		Name:    modelID,
+		Status:  map[string]any{"value": "unloaded"},
+		Meta:    map[string]any{"llamaswap": map[string]any{"type": "peer", "peerID": peerID}},
+	}
+}
+
+// applyPeerModelSettings overlays the declared settings on a record. Config is
+// the authority for every field it names: a peer that publishes nothing gets
+// a full record, and one that publishes something wrong can be corrected
+// without touching the peer.
+func applyPeerModelSettings(rec modelRecord, settings config.PeerModelSettings) modelRecord {
+	if settings.Name != "" {
+		rec.Name = settings.Name
+	}
+	if settings.Description != "" {
+		rec.Description = settings.Description
+	}
+	if !settings.Capabilities.Empty() {
+		rec.Architecture, rec.Capabilities, rec.SupportedParameters, rec.ContextLength = renderCapabilities(settings.Capabilities)
+	}
+	if len(settings.Metadata) > 0 {
+		metadata := settings.Metadata
+		// Matches a local model: a capabilities block owns the top-level
+		// fields it renders, so metadata may not restate them.
+		if !settings.Capabilities.Empty() {
+			metadata = filterCappedMetadata(metadata)
+		}
+		inner := peerInnerMeta(rec.Meta)
+		for key, value := range metadata {
+			inner[key] = value
+		}
+		rec.Meta = map[string]any{"llamaswap": inner}
+	}
+	return rec
+}
+
+// withPeerAliases replaces meta.llamaswap.aliases with the given names, fully
+// qualified. Clients read the alias list to offer a model's request variants,
+// so the names there have to be the ones this server routes.
+func withPeerAliases(meta map[string]any, peerID string, aliases []string) map[string]any {
+	inner := peerInnerMeta(meta)
+	if len(aliases) == 0 {
+		delete(inner, "aliases")
+	} else {
+		qualified := make([]any, 0, len(aliases))
+		for _, alias := range aliases {
+			qualified = append(qualified, config.PeerModelFQN(peerID, alias))
+		}
+		inner["aliases"] = qualified
+	}
+
+	out := make(map[string]any, len(meta)+1)
+	for k, v := range meta {
+		out[k] = v
+	}
+	out["llamaswap"] = inner
+	return out
+}
+
+// peerInnerMeta returns a mutable copy of meta.llamaswap.
+func peerInnerMeta(meta map[string]any) map[string]any {
+	inner := make(map[string]any)
+	if existing, ok := meta["llamaswap"].(map[string]any); ok {
+		for k, v := range existing {
+			inner[k] = v
+		}
+	}
+	return inner
 }

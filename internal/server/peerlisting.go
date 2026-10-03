@@ -280,10 +280,11 @@ func peerFallbackRecord(peerID, modelID string, created int64) modelRecord {
 	}
 }
 
-// applyPeerModelSettings overlays the declared settings on a record. Config is
-// the authority for every field it names: a peer that publishes nothing gets
-// a full record, and one that publishes something wrong can be corrected
-// without touching the peer.
+// applyPeerModelSettings overlays the declared settings on a record. Config
+// wins field by field, the way a local model's capabilities block wins over
+// discovery: a peer that publishes nothing gets a full record, and one that
+// publishes a wrong field is corrected without losing the fields it got
+// right.
 func applyPeerModelSettings(rec modelRecord, settings config.PeerModelSettings) modelRecord {
 	if settings.Name != "" {
 		rec.Name = settings.Name
@@ -292,7 +293,12 @@ func applyPeerModelSettings(rec modelRecord, settings config.PeerModelSettings) 
 		rec.Description = settings.Description
 	}
 	if !settings.Capabilities.Empty() {
-		rec.Architecture, rec.Capabilities, rec.SupportedParameters, rec.ContextLength = renderCapabilities(settings.Capabilities)
+		caps := settings.Capabilities.Merge(publishedCapabilities(rec))
+		rec.Architecture, rec.Capabilities, rec.SupportedParameters, rec.ContextLength = renderCapabilities(caps)
+		// Mirrors a local record: context_window for gateways that read that
+		// name and meta.n_ctx for clients that read llama.cpp's.
+		rec.ContextWindow = rec.ContextLength
+		rec.Meta = withPeerContext(rec.Meta, rec.ContextLength)
 	}
 	if len(settings.Metadata) > 0 {
 		metadata := settings.Metadata
@@ -305,9 +311,63 @@ func applyPeerModelSettings(rec modelRecord, settings config.PeerModelSettings) 
 		for key, value := range metadata {
 			inner[key] = value
 		}
-		rec.Meta = map[string]any{"llamaswap": inner}
+		out := make(map[string]any, len(rec.Meta)+1)
+		for k, v := range rec.Meta {
+			out[k] = v
+		}
+		out["llamaswap"] = inner
+		rec.Meta = out
 	}
 	return rec
+}
+
+// publishedCapabilities reads the fields a peer rendered into its record back
+// into the config shape, so declared capabilities can merge over them rather
+// than replace them wholesale.
+func publishedCapabilities(rec modelRecord) config.ModelCapConfig {
+	caps := config.ModelCapConfig{
+		In:       stringList(rec.Architecture["input_modalities"]),
+		Out:      stringList(rec.Architecture["output_modalities"]),
+		Tools:    rec.Capabilities["function_calling"] == true,
+		Reranker: rec.Capabilities["reranker"] == true,
+		Context:  rec.ContextLength,
+	}
+	if caps.Context == 0 {
+		caps.Context = rec.ContextWindow
+	}
+	return caps
+}
+
+// stringList accepts the list as the JSON decoder delivers it or as the
+// renderer builds it.
+func stringList(v any) []string {
+	switch list := v.(type) {
+	case []string:
+		return list
+	case []any:
+		out := make([]string, 0, len(list))
+		for _, item := range list {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+// withPeerContext sets meta.n_ctx to the context length, leaving meta alone
+// when there is none to report.
+func withPeerContext(meta map[string]any, contextLength int) map[string]any {
+	if contextLength <= 0 {
+		return meta
+	}
+	out := make(map[string]any, len(meta)+1)
+	for k, v := range meta {
+		out[k] = v
+	}
+	out["n_ctx"] = contextLength
+	return out
 }
 
 // withPeerAliases replaces meta.llamaswap.aliases with the given names, fully

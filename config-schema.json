@@ -415,6 +415,61 @@
                         "additionalProperties": true,
                         "default": {},
                         "description": "Arbitrary selector metadata included in /v1/models."
+                    },
+                    "capabilities": {
+                        "type": "object",
+                        "properties": {
+                            "in": {
+                            "type": "array",
+                            "minItems": 1,
+                            "uniqueItems": true,
+                            "default": [],
+                            "items": {
+                                "type": "string",
+                                "enum": [
+                                    "text",
+                                    "audio",
+                                    "image",
+                                    "video"
+                                ]
+                            },
+                            "description": "List of input modalities every target of the selector understands."
+                            },
+                            "out": {
+                            "type": "array",
+                            "minItems": 1,
+                            "uniqueItems": true,
+                            "default": [],
+                            "items": {
+                                "type": "string",
+                                "enum": [
+                                    "text",
+                                    "audio",
+                                    "image",
+                                    "video"
+                                ]
+                            },
+                            "description": "List of output modalities every target of the selector generates."
+                            },
+                            "tools": {
+                                "type": "boolean",
+                                "default": false,
+                                "description": "Whether the selector's targets support function calling."
+                            },
+                            "reranker": {
+                                "type": "boolean",
+                                "default": false,
+                                "description": "Whether the selector's targets support the /v1/rerank endpoint."
+                            },
+                            "context": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "default": 0,
+                                "description": "Maximum token context length a client may assume across the selector's targets."
+                            }
+                        },
+                        "additionalProperties": false,
+                        "description": "Renders the same /v1/models fields a model's capabilities block does: architecture, capabilities, supported_parameters, context_length. A selector over targets that differ publishes what a client may assume of the pool as a whole. Nothing is discovered automatically for a selector."
                     }
                 },
                 "additionalProperties": false
@@ -741,6 +796,17 @@
                             "minLength": 1
                         },
                         "description": "A list of models served by the peer."
+                    },
+                    "healthCheckPath": {
+                        "type": "string",
+                        "pattern": "^/",
+                        "description": "Path probed on the peer every healthCheckInterval seconds. A failed probe takes the peer out of routing until a probe passes. Omitted, the peer is passive: only a failed forward marks it down, and it is tried again after a backoff. /running on a llama-swap peer also reports which models it has loaded."
+                    },
+                    "healthCheckInterval": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 30,
+                        "description": "Seconds between health probes when healthCheckPath is set."
                     },
                     "modelSettings": {
                         "type": "object",

@@ -801,6 +801,13 @@ peers:
     # - required
     # - requested path to llama-swap will be appended to the end of the proxy value
     proxy: http://192.168.1.23
+    # healthCheckPath: a path probed on the peer every healthCheckInterval
+    # seconds; a failed probe takes the peer out of routing until it passes
+    # - optional, default: none (the peer is only marked down by a failed
+    #   forward, and tried again after a backoff)
+    # - /running on a llama-swap peer also reports which models it has loaded
+    healthCheckPath: /running
+    healthCheckInterval: 5
     # models: a list of models served by the peer
     # - required
     models:

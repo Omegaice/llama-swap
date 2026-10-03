@@ -148,8 +148,8 @@ func publicTailcatModelIDs(cfg Config) map[string]struct{} {
 		}
 	}
 	for peerID, peer := range cfg.Peers {
-		for _, model := range peer.Models {
-			ids[PeerModelFQN(peerID, model)] = struct{}{}
+		for _, routable := range peer.RoutableNames() {
+			ids[PeerModelFQN(peerID, routable.Name)] = struct{}{}
 		}
 	}
 	return ids

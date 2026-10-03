@@ -433,11 +433,13 @@ func (s *Server) tailcatExposedModelIDs() []string {
 		candidates[selectorID] = struct{}{}
 	}
 	for peerID, peer := range s.cfg.Peers {
-		for _, modelID := range peer.Models {
-			candidates[config.PeerModelFQN(peerID, modelID)] = struct{}{}
-			if resolvedPeer, resolvedModel, found := s.cfg.ResolvePeerModel(modelID); found &&
-				resolvedPeer == peerID && resolvedModel == modelID {
-				candidates[modelID] = struct{}{}
+		// Aliases are routable names too, so a tailcat.models entry may name
+		// one exactly as a client would request it.
+		for _, routable := range peer.RoutableNames() {
+			candidates[config.PeerModelFQN(peerID, routable.Name)] = struct{}{}
+			if resolvedPeer, resolvedModel, found := s.cfg.ResolvePeerModel(routable.Name); found &&
+				resolvedPeer == peerID && resolvedModel == routable.Name {
+				candidates[routable.Name] = struct{}{}
 			}
 		}
 	}

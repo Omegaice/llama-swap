@@ -4,7 +4,7 @@
 {
   lib,
   stdenv,
-  buildGoModule,
+  buildGo127Module,
   callPackage,
   versionCheckHook,
   bash,
@@ -26,11 +26,11 @@ let
     in
     "${sub 0 4 s}-${sub 4 2 s}-${sub 6 2 s}T${sub 8 2 s}:${sub 10 2 s}:${sub 12 2 s}Z";
 in
-buildGoModule (finalAttrs: {
+buildGo127Module (finalAttrs: {
   pname = "llama-swap";
   # Upstream tag the fork is based on, marked so a listing or /api/version
   # never passes it off as a stock release.
-  version = "249-fleet";
+  version = "262-fleet";
 
   inherit src;
 
@@ -39,7 +39,7 @@ buildGoModule (finalAttrs: {
     "wol" # wake on lan proxy
   ];
 
-  vendorHash = "sha256-MhR8B2+Yb/xqrTlIxaVHLoQf1eTOO49c65l72IAuZyU=";
+  vendorHash = "sha256-yelob7FlaGymASUP0DAUkALQm5vnXZnN5ThbnSkH2Ak=";
 
   # Upstream only embeds the UI when this build tag is set.
   tags = lib.optionals withUI [ "embed_ui" ];
@@ -59,8 +59,9 @@ buildGoModule (finalAttrs: {
     "-X main.date=${date}"
   ];
 
+  # Tests write helper scripts with a bash shebang; the sandbox has no /bin/bash.
   postPatch = ''
-    substituteInPlace internal/process/process_command_forking_test.go \
+    substituteInPlace internal/process/process_command_forking_test.go cmd/vllm-wrapper/main_test.go \
       --replace-fail "#!/bin/bash" "#!${lib.getExe bash}"
   '';
 
@@ -101,6 +102,7 @@ buildGoModule (finalAttrs: {
     "cmd/test-concurrency"
     "cmd/misc/benchmark-chatcompletion"
     "cmd/misc/process-cmd-test"
+    "cmd/misc/test-rerank"
   ];
 
   # Tests execute the simple-responder helper from ./build and check the

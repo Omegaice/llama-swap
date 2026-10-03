@@ -126,8 +126,12 @@ Clients request `llama` and get the cheapest target with capacity. See
 
 - Fully qualified peer names are reserved — they are the IDs `/v1/models`
   reports.
-- Selectors are not supported on `/upstream/<model>` paths, so peer models are
-  not reachable through the upstream passthrough.
+- `/upstream/<peerID>/<model>/...` forwards to the peer. When the peer is
+  itself llama-swap (its listing carries `meta.llamaswap`), the request goes
+  to the peer's own `/upstream/<model>/...`, so the model server behind it
+  answers rather than the peer's llama-swap. A model the peer lists but this
+  config never declared is reachable the same way.
+- Selectors are not supported on `/upstream/<model>` paths.
 - llama-swap does not manage the peer's lifecycle. It cannot start, stop or
   TTL-unload anything on the other side.
 

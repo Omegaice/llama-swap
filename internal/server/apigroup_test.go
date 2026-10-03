@@ -692,7 +692,22 @@ func TestServer_APILogEvents_SelectedStreams(t *testing.T) {
 
 func TestServer_APILogEvents_NoHistory(t *testing.T) {
 	s := newTestServer(newStubRouter(nil, ""), newStubRouter(nil, ""))
+	// Live delivery is asynchronous, so wait until the history line has been
+	// broadcast; otherwise a later subscriber receives it as live data.
+	published := make(chan struct{}, 1)
+	unsubscribe := s.logs.UpstreamLogs.OnLogData(func([]byte) {
+		select {
+		case published <- struct{}{}:
+		default:
+		}
+	})
 	s.logs.UpstreamLogs.Info("UPSTREAMHIST")
+	select {
+	case <-published:
+	case <-time.After(2 * time.Second):
+		t.Fatal("history line was never broadcast")
+	}
+	unsubscribe()
 
 	w := serveLogEvents(t, s, "/api/events/logs?stream=upstream&no-history", func() {
 		s.logs.UpstreamLogs.Info("UPSTREAMLIVE")

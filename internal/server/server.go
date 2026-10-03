@@ -232,6 +232,7 @@ func New(cfg config.Config, logs *logmon.Group, perfMon *perf.Monitor, st store.
 		return nil, fmt.Errorf("creating peer router: %w", err)
 	}
 	peerHealth := newPeerHealthTracker(cfg, logs.ProxyLogs)
+	peerHealth.transport = peer.Transport
 	peer.SetHealth(peerHealth)
 
 	if st == nil {
@@ -253,6 +254,7 @@ func New(cfg config.Config, logs *logmon.Group, perfMon *perf.Monitor, st store.
 		local:         local,
 		peer:          peer,
 		peerHealth:    peerHealth,
+		peerListings:  peerListingCache{transport: peer.Transport},
 		shutdownCtx:   shutdownCtx,
 		shutdownFn:    shutdownFn,
 	}

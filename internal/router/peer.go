@@ -221,6 +221,18 @@ func (r *Peer) SetHealth(health PeerHealth) {
 	r.health = health
 }
 
+// Transport returns the round tripper that reaches the peer, so a side
+// channel (its model listing, a health probe) crosses the same dialer the
+// proxy does; a Tailcat peer has no other way in. ok is false for an
+// unknown peer id.
+func (r *Peer) Transport(peerID string) (http.RoundTripper, bool) {
+	member, ok := r.byID[peerID]
+	if !ok {
+		return nil, false
+	}
+	return member.transport, true
+}
+
 // PeerFor returns the peer id that serves the routed model name.
 func (r *Peer) PeerFor(model string) (string, bool) {
 	route, ok := r.peers[model]

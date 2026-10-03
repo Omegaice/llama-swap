@@ -47,10 +47,11 @@ type peerHealthState struct {
 }
 
 type peerHealthTracker struct {
-	mu     sync.Mutex
-	peers  map[string]*peerHealthState
-	logger *logmon.Monitor
-	now    func() time.Time
+	mu        sync.Mutex
+	peers     map[string]*peerHealthState
+	logger    *logmon.Monitor
+	now       func() time.Time
+	transport peerTransportFunc
 }
 
 func newPeerHealthTracker(cfg config.Config, logger *logmon.Monitor) *peerHealthTracker {
@@ -223,7 +224,7 @@ func (t *peerHealthTracker) poll(ctx context.Context, peerID string, peer config
 }
 
 func (t *peerHealthTracker) probe(ctx context.Context, peerID string, peer config.PeerConfig) {
-	running, err := probePeer(ctx, peer)
+	running, err := probePeer(ctx, peer, peerClient(t.transport, peerID))
 	if err != nil {
 		t.MarkDown(peerID, err)
 		return
@@ -234,7 +235,7 @@ func (t *peerHealthTracker) probe(ctx context.Context, peerID string, peer confi
 // probePeer fetches the peer's health path. A body shaped like /running
 // ({"running": [{"model", "state"}, ...]}) is decoded into process states;
 // any other 2xx body is accepted as a bare liveness answer.
-func probePeer(ctx context.Context, peer config.PeerConfig) (map[string]string, error) {
+func probePeer(ctx context.Context, peer config.PeerConfig, client *http.Client) (map[string]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, peerHealthProbeTimeout)
 	defer cancel()
 
@@ -246,7 +247,7 @@ func probePeer(ctx context.Context, peer config.PeerConfig) (map[string]string, 
 		req.Header.Set("Authorization", "Bearer "+peer.ApiKey)
 		req.Header.Set("x-api-key", peer.ApiKey)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

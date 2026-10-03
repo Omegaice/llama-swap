@@ -38,9 +38,27 @@ type peerLiveRecord struct {
 	rec        modelRecord
 }
 
+// peerTransportFunc returns the transport the router built for a peer. The
+// router's dialer is the only way to reach a Tailcat peer, so every side
+// channel goes through it rather than the process default.
+type peerTransportFunc func(peerID string) (http.RoundTripper, bool)
+
+// peerClient is the client a side channel uses for a peer: the router's
+// transport when it knows the peer, the default otherwise (a config built
+// without a router, as in tests).
+func peerClient(transport peerTransportFunc, peerID string) *http.Client {
+	if transport != nil {
+		if rt, ok := transport(peerID); ok {
+			return &http.Client{Transport: rt}
+		}
+	}
+	return http.DefaultClient
+}
+
 type peerListingCache struct {
-	mu      sync.Mutex
-	entries map[string]peerListingEntry
+	mu        sync.Mutex
+	entries   map[string]peerListingEntry
+	transport peerTransportFunc
 }
 
 type peerListingEntry struct {
@@ -58,7 +76,7 @@ func (c *peerListingCache) records(peerID string, peer config.PeerConfig) ([]pee
 		return entry.records, entry.records != nil
 	}
 
-	records, err := fetchPeerListing(peerID, peer)
+	records, err := fetchPeerListing(peerID, peer, peerClient(c.transport, peerID))
 	if err != nil {
 		records = nil
 	}
@@ -71,7 +89,7 @@ func (c *peerListingCache) records(peerID string, peer config.PeerConfig) ([]pee
 	return records, records != nil
 }
 
-func fetchPeerListing(peerID string, peer config.PeerConfig) ([]peerLiveRecord, error) {
+func fetchPeerListing(peerID string, peer config.PeerConfig, client *http.Client) ([]peerLiveRecord, error) {
 	// A config built without UnmarshalYAML (tests, embedding) has no parsed URL
 	if peer.ProxyURL == nil {
 		return nil, fmt.Errorf("peer %s has no proxy URL", peerID)
@@ -89,7 +107,7 @@ func fetchPeerListing(peerID string, peer config.PeerConfig) ([]peerLiveRecord, 
 		req.Header.Set("x-api-key", peer.ApiKey)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

@@ -98,18 +98,18 @@ func TestPeerHealth_ProbeDecodesRunning(t *testing.T) {
 	proxyURL, _ := url.Parse(srv.URL)
 
 	peer := config.PeerConfig{ProxyURL: proxyURL, ApiKey: "k", HealthCheckPath: "/running"}
-	running, err := probePeer(context.Background(), peer)
+	running, err := probePeer(context.Background(), peer, http.DefaultClient)
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"qwen": "ready", "gemma": "starting"}, running)
 	assert.Equal(t, "Bearer k", gotAuth)
 
 	peer.HealthCheckPath = "/v1/models"
-	running, err = probePeer(context.Background(), peer)
+	running, err = probePeer(context.Background(), peer, http.DefaultClient)
 	require.NoError(t, err)
 	assert.Empty(t, running, "a liveness body carries no process states")
 
 	peer.HealthCheckPath = "/down"
-	_, err = probePeer(context.Background(), peer)
+	_, err = probePeer(context.Background(), peer, http.DefaultClient)
 	require.Error(t, err)
 
 	tracker, _ := healthTestTracker(t, true)

@@ -234,7 +234,12 @@ func annotatePeerMeta(meta map[string]any, peerID string) (map[string]any, []str
 // forwarded as they arrive, so a llama-swap peer still needs no declaration to
 // be discoverable.
 func (s *Server) composePeerRecords(peerID string, peer config.PeerConfig, created int64) []modelRecord {
-	live, _ := s.peerListings.records(peerID, peer)
+	// A peer the health gate holds down is not dialled for its listing; a
+	// black-holed dial would stall the whole listing for the connect timeout.
+	var live []peerLiveRecord
+	if s.peerHealth.Allow(peerID) {
+		live, _ = s.peerListings.records(peerID, peer)
+	}
 
 	byUpstream := make(map[string]peerLiveRecord, len(live))
 	// A declared model that the peer serves as an alias of another model is

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -118,4 +119,23 @@ func TestPeerListingCache_LlamaSwapVerdictSurvivesFailure(t *testing.T) {
 	assert.True(t, cache.isLlamaSwap("p", peer))
 	_, ok := cache.records("p", peer)
 	assert.False(t, ok, "the failed fetch itself is still reported")
+}
+
+// A peer the health gate holds down is not dialled for its listing; its
+// declared models fall back to synthesized records.
+func TestComposePeerRecords_SkipsDownPeer(t *testing.T) {
+	s, listings := upstreamChainServer(t, `{"object":"list","data":[{"id":"foo"},{"id":"extra"}]}`)
+	s.peerHealth = newPeerHealthTracker(s.cfg, logmon.NewWriter(io.Discard))
+
+	records := s.composePeerRecords("p", s.cfg.Peers["p"], 0)
+	require.Len(t, records, 2)
+	assert.Equal(t, int32(1), listings.Load())
+
+	s.peerHealth.MarkDown("p", errors.New("dial tcp: no route to host"))
+	s.peerListings = peerListingCache{} // forget the cached listing
+	records = s.composePeerRecords("p", s.cfg.Peers["p"], 0)
+	require.Len(t, records, 1, "only the declared model, synthesized")
+	assert.Equal(t, "p/foo", records[0].ID)
+	assert.Equal(t, map[string]any{"value": "unloaded"}, records[0].Status)
+	assert.Equal(t, int32(1), listings.Load(), "no dial while down")
 }

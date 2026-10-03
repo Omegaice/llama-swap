@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -446,6 +447,9 @@ func (s *Server) handleUpstream(w http.ResponseWriter, r *http.Request) {
 
 	searchName, modelID, remainingPath, found := swaputil.FindModelInPath(s.cfg, "/"+upstreamPath)
 	if !found {
+		searchName, modelID, remainingPath, found = s.findForwardedPeerModel(upstreamPath)
+	}
+	if !found {
 		swaputil.SendResponse(w, r, http.StatusNotFound, "model not found")
 		return
 	}
@@ -470,6 +474,13 @@ func (s *Server) handleUpstream(w http.ResponseWriter, r *http.Request) {
 	escapedRemaining := swaputil.EscapedPathSuffix(r.URL.EscapedPath(), "/upstream/"+searchName)
 	r.URL.Path = remainingPath
 	r.URL.RawPath = escapedRemaining
+	// A peer that is itself llama-swap keeps the model server's routes behind
+	// its own /upstream/<model>/, so the hop re-adds the prefix under the name
+	// that peer serves the model as.
+	if _, upstreamModel, chained := s.chainedPeerModel(modelID); chained {
+		r.URL.Path = "/upstream/" + upstreamModel + remainingPath
+		r.URL.RawPath = "/upstream/" + escapePathSegments(upstreamModel) + escapedRemaining
+	}
 	// Pin the resolved model so the router skips body/query extraction.
 	*r = *r.WithContext(swaputil.SetContext(r.Context(), swaputil.ReqContextData{Model: searchName, ModelID: modelID, Metadata: make(map[string]string)}))
 
@@ -503,6 +514,66 @@ func (s *Server) handleUpstream(w http.ResponseWriter, r *http.Request) {
 	default:
 		swaputil.SendResponse(w, r, http.StatusNotFound, "no router for model "+modelID)
 	}
+}
+
+// peerResolver is the part of the peer router /upstream needs: which peer a
+// routed name lands on and what the peer calls the model.
+type peerResolver interface {
+	Route(model string) (peerID, upstreamModel string, ok bool)
+}
+
+// findForwardedPeerModel resolves <peerID>/<model>/... for a model the peer
+// publishes but this config never declared, which the listing already
+// forwards under that name. The longest peer prefix wins, as in the router,
+// and the peer's listing says where the model name ends.
+func (s *Server) findForwardedPeerModel(upstreamPath string) (searchName, modelID, remainingPath string, found bool) {
+	var bestID string
+	for peerID := range s.cfg.Peers {
+		if len(peerID) > len(bestID) && strings.HasPrefix(upstreamPath, peerID+"/") {
+			bestID = peerID
+		}
+	}
+	if bestID == "" {
+		return "", "", "", false
+	}
+	name, remaining, ok := s.peerListings.findLive(bestID, s.cfg.Peers[bestID], upstreamPath[len(bestID)+1:])
+	if !ok {
+		return "", "", "", false
+	}
+	fqn := config.PeerModelFQN(bestID, name)
+	return fqn, fqn, remaining, true
+}
+
+// chainedPeerModel reports whether modelID is served by a peer that is itself
+// llama-swap, and the name that peer serves it as. Local models are
+// dispatched first, so a local name never chains.
+func (s *Server) chainedPeerModel(modelID string) (peerID, upstreamModel string, ok bool) {
+	if s.local.Handles(modelID) {
+		return "", "", false
+	}
+	resolver, isResolver := s.peer.(peerResolver)
+	if !isResolver {
+		return "", "", false
+	}
+	peerID, upstreamModel, ok = resolver.Route(modelID)
+	if !ok {
+		return "", "", false
+	}
+	peer, declared := s.cfg.Peers[peerID]
+	if !declared || !s.peerListings.isLlamaSwap(peerID, peer) {
+		return "", "", false
+	}
+	return peerID, upstreamModel, true
+}
+
+// escapePathSegments percent-encodes each segment of a model name for
+// RawPath, keeping the slashes that separate them.
+func escapePathSegments(name string) string {
+	parts := strings.Split(name, "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	return strings.Join(parts, "/")
 }
 
 // handleAPIPeers reports every peer's health: whether it is probed, up or

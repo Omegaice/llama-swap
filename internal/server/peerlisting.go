@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -64,35 +65,83 @@ type peerListingCache struct {
 type peerListingEntry struct {
 	fetched time.Time
 	records []peerLiveRecord // nil when the last fetch failed
+	// llamaSwap is set once the peer's records carried llama-swap's own
+	// metadata, and kept across failed refetches so a peer that is briefly
+	// unreachable does not change the shape of its routes.
+	llamaSwap bool
 }
 
 // records returns the peer's listing, refetching when the cached copy
 // (including a cached failure) is older than the TTL.
 func (c *peerListingCache) records(peerID string, peer config.PeerConfig) ([]peerLiveRecord, bool) {
+	entry := c.entry(peerID, peer)
+	return entry.records, entry.records != nil
+}
+
+// isLlamaSwap reports whether the peer's listing identified it as another
+// llama-swap. Such a peer serves a model server's own routes under
+// /upstream/<model>/, not at its root.
+func (c *peerListingCache) isLlamaSwap(peerID string, peer config.PeerConfig) bool {
+	return c.entry(peerID, peer).llamaSwap
+}
+
+// findLive matches the front of rest against the names the peer publishes
+// (ids and their aliases), longest first, so a model this config never
+// declared still splits from the path that follows it. remaining starts with
+// a slash, or is "/" when nothing follows the name.
+func (c *peerListingCache) findLive(peerID string, peer config.PeerConfig, rest string) (name, remaining string, ok bool) {
+	live, _ := c.records(peerID, peer)
+	for _, entry := range live {
+		for _, candidate := range append([]string{entry.upstreamID}, entry.aliases...) {
+			if len(candidate) <= len(name) {
+				continue
+			}
+			if rest == candidate || strings.HasPrefix(rest, candidate+"/") {
+				name, ok = candidate, true
+			}
+		}
+	}
+	if !ok {
+		return "", "", false
+	}
+	remaining = rest[len(name):]
+	if remaining == "" {
+		remaining = "/"
+	}
+	return name, remaining, true
+}
+
+// entry returns the peer's cache entry, refreshing it when it is older than
+// the TTL.
+func (c *peerListingCache) entry(peerID string, peer config.PeerConfig) peerListingEntry {
 	c.mu.Lock()
 	entry, ok := c.entries[peerID]
 	c.mu.Unlock()
 	if ok && time.Since(entry.fetched) < peerListingTTL {
-		return entry.records, entry.records != nil
+		return entry
 	}
 
-	records, err := fetchPeerListing(peerID, peer, peerClient(c.transport, peerID))
+	records, llamaSwap, err := fetchPeerListing(peerID, peer, peerClient(c.transport, peerID))
 	if err != nil {
-		records = nil
+		records, llamaSwap = nil, entry.llamaSwap
 	}
+	entry = peerListingEntry{fetched: time.Now(), records: records, llamaSwap: llamaSwap}
 	c.mu.Lock()
 	if c.entries == nil {
 		c.entries = make(map[string]peerListingEntry)
 	}
-	c.entries[peerID] = peerListingEntry{fetched: time.Now(), records: records}
+	c.entries[peerID] = entry
 	c.mu.Unlock()
-	return records, records != nil
+	return entry
 }
 
-func fetchPeerListing(peerID string, peer config.PeerConfig, client *http.Client) ([]peerLiveRecord, error) {
+// fetchPeerListing reads the peer's /v1/models. llamaSwap reports whether the
+// records carried llama-swap's own metadata block, which every record a
+// llama-swap lists has and a bare OpenAI-compatible server never writes.
+func fetchPeerListing(peerID string, peer config.PeerConfig, client *http.Client) (records []peerLiveRecord, llamaSwap bool, err error) {
 	// A config built without UnmarshalYAML (tests, embedding) has no parsed URL
 	if peer.ProxyURL == nil {
-		return nil, fmt.Errorf("peer %s has no proxy URL", peerID)
+		return nil, false, fmt.Errorf("peer %s has no proxy URL", peerID)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), peerListingTimeout)
@@ -100,7 +149,7 @@ func fetchPeerListing(peerID string, peer config.PeerConfig, client *http.Client
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, peer.ProxyURL.JoinPath("/v1/models").String(), nil)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if peer.ApiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+peer.ApiKey)
@@ -109,22 +158,25 @@ func fetchPeerListing(peerID string, peer config.PeerConfig, client *http.Client
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("peer %s listing: HTTP %d", peerID, resp.StatusCode)
+		return nil, false, fmt.Errorf("peer %s listing: HTTP %d", peerID, resp.StatusCode)
 	}
 
 	var listing struct {
 		Data []modelRecord `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&listing); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
-	records := make([]peerLiveRecord, 0, len(listing.Data))
+	records = make([]peerLiveRecord, 0, len(listing.Data))
 	for _, rec := range listing.Data {
+		if _, ok := rec.Meta["llamaswap"].(map[string]any); ok {
+			llamaSwap = true
+		}
 		meta, aliases, chained := annotatePeerMeta(rec.Meta, peerID)
 		// A record the peer itself federated already carries a peerID; the
 		// chain can reflect this server's own models back, so only first-hop
@@ -139,7 +191,7 @@ func fetchPeerListing(peerID string, peer config.PeerConfig, client *http.Client
 		rec.Meta = meta
 		records = append(records, peerLiveRecord{upstreamID: upstreamID, aliases: aliases, rec: rec})
 	}
-	return records, nil
+	return records, llamaSwap, nil
 }
 
 // annotatePeerMeta clones meta with meta.llamaswap.peerID set, returning the

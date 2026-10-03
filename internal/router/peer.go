@@ -233,6 +233,20 @@ func (r *Peer) Transport(peerID string) (http.RoundTripper, bool) {
 	return member.transport, true
 }
 
+// Route reports which peer serves the routed model name and the name the
+// peer knows it by, for a declared model, an alias, or an undeclared
+// <peerID>/<modelID> prefix route.
+func (r *Peer) Route(model string) (peerID, upstreamModel string, ok bool) {
+	route, found := r.peers[model]
+	if !found {
+		route, found = r.prefixRoute(model)
+	}
+	if !found {
+		return "", "", false
+	}
+	return route.member.peerID, route.modelID, true
+}
+
 // PeerFor returns the peer id that serves the routed model name.
 func (r *Peer) PeerFor(model string) (string, bool) {
 	route, ok := r.peers[model]
